@@ -143,7 +143,9 @@ inline uint64_t hessian2_input::parse_64bit() {
 }
 
 inline void hessian2_input::parse_raw_bytes(uint32_t byte_size, std::string* dest) {
-    if (_curr + byte_size - 1 >= _end) {
+    /* must not form "_curr + byte_size": with an untrusted 32-bit byte_size
+     * the pointer could wrap on 32-bit builds and defeat the bounds check */
+    if (byte_size > (uint32_t) (_end - _curr)) {
         throw io_exception("hessian2_input::read_raw_bytes(): will reach EOF");
     }
     dest->append(_curr, byte_size);

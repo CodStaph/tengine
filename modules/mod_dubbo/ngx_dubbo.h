@@ -74,6 +74,14 @@ typedef struct {
 #define DUBBO_FLAG_TWOWAY             0x40
 #define DUBBO_FLAG_PING               0x20
 
+/*
+ * Maximum accepted size of a single Dubbo response payload.  The on-wire
+ * length field is 32-bit, so a compromised or buggy upstream could otherwise
+ * request a ~4GB worker allocation per response.  Exceeding the limit is a
+ * protocol error and tears the connection down.
+ */
+#define NGX_DUBBO_MAX_PAYLOAD_LEN     (10 * 1024 * 1024)
+
 typedef enum {
     DUBBO_PARSE_READ_HEADER = 0,
     DUBBO_PARSE_READ_PAYLOAD = 1,

@@ -43,7 +43,6 @@ int ngx_dubbo_is_big_endian() {
 }
 
 static const u_char DUBBO_VERSION_ENCODE[] = { 0x05, 0x32, 0x2e, 0x30, 0x2e, 0x32 };            //0x05"2.0.2"
-static const u_char DUBBO_SERVICE_VERSION_ENCODE[] = { 0x05, 0x30, 0x2e, 0x30, 0x2e, 0x30 };   //0x05"0.0.0"
 
 static const u_char DUBBO_NULL[] = { 0x4e };                                                    //"N" null
 static const u_char DUBBO_FLAG_REQ_HESSIAN2 = 0xc2;                                             // 0b11000010  req & hessian2
@@ -207,8 +206,8 @@ ngx_dubbo_encode_request(ngx_dubbo_connection_t *dubbo_c, ngx_str_t *service_nam
     b->last += service_name_encode.len;
 
     //service version
-    memcpy(b->last, DUBBO_SERVICE_VERSION_ENCODE, sizeof(DUBBO_VERSION_ENCODE));
-    b->last += sizeof(DUBBO_SERVICE_VERSION_ENCODE);
+    memcpy(b->last, service_version_encode.data, service_version_encode.len);
+    b->last += service_version_encode.len;
 
     //method name
     memcpy(b->last, method_name_encode.data, method_name_encode.len);
@@ -226,6 +225,17 @@ ngx_dubbo_encode_request(ngx_dubbo_connection_t *dubbo_c, ngx_str_t *service_nam
     //props
     memcpy(b->last, props.data, props.len);
     b->last += props.len;
+
+    /* b was created with exactly len bytes; drift between the size accounting
+     * above and the writes below would mean a heap overflow, so refuse to
+     * send a request whose encoding does not add up */
+    if (b->last != b->end) {
+        ngx_log_error(NGX_LOG_ALERT, dubbo_c->log, 0,
+                      "dubbo: encoded request size mismatch: "
+                      "%z bytes written, %z bytes accounted",
+                      (ssize_t) (b->last - b->start), (ssize_t) len);
+        return NGX_ERROR;
+    }
 
     ngx_reset_pool(dubbo_c->temp_pool);
     return NGX_OK;
@@ -357,6 +367,15 @@ ngx_dubbo_decode_response(ngx_dubbo_connection_t *dubbo_c, ngx_chain_t *in)
 
                 break;
             case DUBBO_PARSE_READ_PAYLOAD:
+                if (resp->header.payloadlen > NGX_DUBBO_MAX_PAYLOAD_LEN) {
+                    ngx_log_error(NGX_LOG_ERR, dubbo_c->log, 0,
+                                  "dubbo: upstream response payload %uD bytes"
+                                  " exceeds the limit %d bytes",
+                                  resp->header.payloadlen,
+                                  NGX_DUBBO_MAX_PAYLOAD_LEN);
+                    return NGX_ERROR;
+                }
+
                 if (resp->header.payloadlen > resp->payload_alloc || resp->payload == NULL) {
                     if (resp->payload != NULL) {
                         ngx_free(resp->payload);
