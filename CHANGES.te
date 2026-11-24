@@ -1,5 +1,15 @@
 Changes with Tengine 3.2.0                                         31 Jul 2026
 
+    *) Feature: the session_sticky directive now supports Set-Cookie
+       security attributes via the flags= argument, e.g.
+       "session_sticky cookie=route flags=httponly,secure,samesite=lax"
+       with httponly, secure and samesite=strict|lax|none; unconfigured
+       flags keep the previous behavior (issue #1999) (my2linhuasc)
+
+    *) Bugfix: the session stickiness module under-reserved the buffer for
+       the Expires attribute when maxage= pushed the expiry past year 2037,
+       when ngx_http_cookie_time() switches to a 4-digit year (my2linhuasc)
+
     *) Security: fixed CVE-2026-49975, HPACK/QPACK header decompression bomb
        in HTTP/1, HTTP/2 and HTTP/3 (lianglli)
 

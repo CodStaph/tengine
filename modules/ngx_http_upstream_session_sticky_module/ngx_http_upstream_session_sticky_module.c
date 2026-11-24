@@ -20,6 +20,15 @@
 #define NGX_HTTP_SESSION_STICKY_MD5             0x0040
 #define NGX_HTTP_SESSION_STICKY_PLAIN           0X0080
 
+/* Set-Cookie security attributes (issue #1999) */
+#define NGX_HTTP_SESSION_STICKY_HTTPONLY        0x0100
+#define NGX_HTTP_SESSION_STICKY_SECURE          0x0200
+#define NGX_HTTP_SESSION_STICKY_SAMESITE        0x0400
+
+#define NGX_HTTP_SESSION_STICKY_SAMESITE_STRICT 0
+#define NGX_HTTP_SESSION_STICKY_SAMESITE_LAX    1
+#define NGX_HTTP_SESSION_STICKY_SAMESITE_NONE   2
+
 #define is_space(c) ((c) == ' ' || (c) == '\t' || (c) == '\n')
 
 
@@ -45,6 +54,8 @@ typedef struct {
     ngx_str_t                           domain;
     ngx_str_t                           path;
     ngx_str_t                           maxage;
+
+    ngx_uint_t                          samesite;   /* NGX_HTTP_SESSION_STICKY_SAMESITE_* */
 
     ngx_uint_t                          number;
     ngx_http_ss_server_t               *server;
@@ -967,7 +978,19 @@ ngx_http_session_sticky_insert(ngx_http_request_t *r)
                               + sizeof("; Max-Age=") - 1
                               + ctx->sscf->maxage.len
                               + sizeof("; Expires=") - 1
-                              + sizeof("Xxx, 00-Xxx-00 00:00:00 GMT") - 1;
+                              + sizeof("Xxx, 00-Xxx-0000 00:00:00 GMT") - 1;
+    }
+
+    if (ctx->sscf->flag & NGX_HTTP_SESSION_STICKY_HTTPONLY) {
+        set_cookie->value.len += sizeof("; HttpOnly") - 1;
+    }
+
+    if (ctx->sscf->flag & NGX_HTTP_SESSION_STICKY_SECURE) {
+        set_cookie->value.len += sizeof("; Secure") - 1;
+    }
+
+    if (ctx->sscf->flag & NGX_HTTP_SESSION_STICKY_SAMESITE) {
+        set_cookie->value.len += sizeof("; SameSite=Strict") - 1;
     }
 
     p = ngx_pnalloc(r->pool, set_cookie->value.len);
@@ -1001,6 +1024,29 @@ ngx_http_session_sticky_insert(ngx_http_request_t *r)
         ngx_uint_t maxage = ngx_atoi(ctx->sscf->maxage.data,
                                       ctx->sscf->maxage.len);
         p = ngx_http_cookie_time(p, ngx_time() + maxage);
+    }
+
+    if (ctx->sscf->flag & NGX_HTTP_SESSION_STICKY_HTTPONLY) {
+        p = ngx_cpymem(p, "; HttpOnly", sizeof("; HttpOnly") - 1);
+    }
+
+    if (ctx->sscf->flag & NGX_HTTP_SESSION_STICKY_SECURE) {
+        p = ngx_cpymem(p, "; Secure", sizeof("; Secure") - 1);
+    }
+
+    if (ctx->sscf->flag & NGX_HTTP_SESSION_STICKY_SAMESITE) {
+        p = ngx_cpymem(p, "; SameSite=", sizeof("; SameSite=") - 1);
+        switch (ctx->sscf->samesite) {
+        case NGX_HTTP_SESSION_STICKY_SAMESITE_LAX:
+            p = ngx_cpymem(p, "Lax", sizeof("Lax") - 1);
+            break;
+        case NGX_HTTP_SESSION_STICKY_SAMESITE_NONE:
+            p = ngx_cpymem(p, "None", sizeof("None") - 1);
+            break;
+        default: /* NGX_HTTP_SESSION_STICKY_SAMESITE_STRICT */
+            p = ngx_cpymem(p, "Strict", sizeof("Strict") - 1);
+            break;
+        }
     }
 
     set_cookie->value.len = p - set_cookie->value.data;
@@ -1252,8 +1298,106 @@ ngx_http_upstream_session_sticky(ngx_conf_t *cf, ngx_command_t *cmd,
             continue;
         }
 
+        if (ngx_strncmp(value[i].data, "flags=", 6) == 0) {
+            /*
+             * Set-Cookie security attributes (issue #1999):
+             *
+             *     session_sticky ... flags=httponly,secure,samesite=lax
+             *
+             * The config parser splits directive arguments on whitespace,
+             * so several flags are kept inside one argument here and are
+             * separated by commas.  Flags are matched case-insensitively.
+             */
+            u_char    *start, *last, *cur;
+            ngx_str_t  token;
+
+            if (value[i].len == sizeof("flags=") - 1) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "empty flags");
+                return NGX_CONF_ERROR;
+            }
+
+            start = value[i].data + sizeof("flags=") - 1;
+            last = value[i].data + value[i].len;
+
+            for (cur = start; cur < last; /* void */) {
+                token.data = cur;
+                while (cur < last && *cur != ',') {
+                    cur++;
+                }
+                token.len = cur++ - token.data;
+
+                if (token.len == 0) {
+                    continue;
+                }
+
+                if (token.len == sizeof("httponly") - 1
+                    && ngx_strncasecmp(token.data, (u_char *) "httponly",
+                                       token.len) == 0)
+                {
+                    sscf->flag |= NGX_HTTP_SESSION_STICKY_HTTPONLY;
+
+                } else if (token.len == sizeof("secure") - 1
+                    && ngx_strncasecmp(token.data, (u_char *) "secure",
+                                       token.len) == 0)
+                {
+                    sscf->flag |= NGX_HTTP_SESSION_STICKY_SECURE;
+
+                } else if (token.len > sizeof("samesite=") - 1
+                    && ngx_strncasecmp(token.data, (u_char *) "samesite=",
+                                       sizeof("samesite=") - 1) == 0)
+                {
+                    u_char  *val = token.data + sizeof("samesite=") - 1;
+                    size_t   vlen = token.len - (sizeof("samesite=") - 1);
+
+                    sscf->flag |= NGX_HTTP_SESSION_STICKY_SAMESITE;
+
+                    if (vlen == sizeof("strict") - 1
+                        && ngx_strncasecmp(val, (u_char *) "strict",
+                                           vlen) == 0)
+                    {
+                        sscf->samesite = NGX_HTTP_SESSION_STICKY_SAMESITE_STRICT;
+
+                    } else if (vlen == sizeof("lax") - 1
+                        && ngx_strncasecmp(val, (u_char *) "lax", vlen) == 0)
+                    {
+                        sscf->samesite = NGX_HTTP_SESSION_STICKY_SAMESITE_LAX;
+
+                    } else if (vlen == sizeof("none") - 1
+                        && ngx_strncasecmp(val, (u_char *) "none",
+                                           vlen) == 0)
+                    {
+                        sscf->samesite = NGX_HTTP_SESSION_STICKY_SAMESITE_NONE;
+
+                    } else {
+                        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                           "invalid samesite value \"%*s\"",
+                                           vlen, val);
+                        return NGX_CONF_ERROR;
+                    }
+
+                } else {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                       "invalid flags \"%*s\"",
+                                       token.len, token.data);
+                    return NGX_CONF_ERROR;
+                }
+            }
+
+            continue;
+        }
+
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "invalid argument");
         return NGX_CONF_ERROR;
+    }
+
+    if ((sscf->flag & NGX_HTTP_SESSION_STICKY_SAMESITE)
+        && sscf->samesite == NGX_HTTP_SESSION_STICKY_SAMESITE_NONE
+        && !(sscf->flag & NGX_HTTP_SESSION_STICKY_SECURE))
+    {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "samesite=none without the secure flag is "
+                           "rejected by modern browsers, consider adding "
+                           "secure");
     }
 
     return NGX_CONF_OK;
