@@ -1,0 +1,10 @@
+# Normalize all text files to LF in the repository index
+* text=auto
+
+# Scripts that must execute on Linux: keep LF in repo AND on every checkout
+*.sh                 text eol=lf
+configure            text eol=lf
+auto/**              text eol=lf
+modules/**/config    text eol=lf
+Makefile             text eol=lf
+packages/build/*.env text eol=lf
